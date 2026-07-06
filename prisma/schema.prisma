@@ -1,0 +1,127 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+enum Role {
+  SUPER_ADMIN
+  SCHOOL_ADMIN
+  STUDENT
+}
+
+enum Lesson {
+  LESSON_1
+  LESSON_2
+  LESSON_3
+  LESSON_4
+  LESSON_5
+  LESSON_6
+  LESSON_7
+  LESSON_8
+  LESSON_9
+  LESSON_10
+  LESSON_11
+  LESSON_12
+  LESSON_13
+  LESSON_14
+  LESSON_15
+}
+
+enum QuestionType {
+  MCQ
+  TRUE_FALSE
+  SHORT_ANSWER
+}
+
+enum LessonStatus {
+  LOCKED
+  LESSON_OPEN
+  QUIZ_OPEN
+}
+
+model School {
+  id              String          @id @default(uuid())
+  name            String
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+    users           User[]
+  quizzes         Quiz[]
+  lessonControls  LessonControl[]
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  username  String   @unique
+  email     String   @unique
+  password  String
+  role      Role     @default(STUDENT)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  schoolId  String?
+  school    School?  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  submissions Submission[]
+}
+
+model Quiz {
+  id         String   @id @default(uuid())
+  lessonName Lesson   
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  schoolId   String
+  school     School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  questions   Question[]
+  submissions Submission[]
+
+  @@unique([lessonName, schoolId])
+}
+
+model Question {
+  id           String       @id @default(uuid())
+  questionText String
+  questionType QuestionType @default(MCQ)
+  options      Json?        
+  correctAnswer String       
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  quizId       String
+  quiz         Quiz         @relation(fields: [quizId], references: [id], onDelete: Cascade)
+}
+
+model Submission {
+  id         String   @id @default(uuid())
+  score      Int
+  lessonName Lesson
+  createdAt  DateTime @default(now())
+
+  studentId  String
+  student    User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  quizId     String
+  quiz       Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, quizId])
+}
+
+model LessonControl {
+  id           String        @id @default(uuid())
+  lessonName   Lesson
+  status       LessonStatus  @default(LOCKED)
+  activeQuizId String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  schoolId     String
+  school       School        @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  @@unique([lessonName, schoolId])
+}
