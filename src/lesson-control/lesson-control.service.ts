@@ -1,15 +1,20 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { UpdateLessonControlDto } from './dto/update-lesson-control.dto';
-import { Lesson, LessonStatus } from '@prisma/client';
+import { Lesson, LessonControl, LessonStatus } from '@prisma/client';
 import { LessonControlGateway } from './lesson-control.gateway';
+
+export const EXAM_DURATION_MS = 60 * 60 * 1000; // 1 hour, authoritative on the server
 
 @Injectable()
 export class LessonControlService {
+  private readonly logger = new Logger(LessonControlService.name);
+
   constructor(
     private prisma: PrismaService,
     private lessonControlGateway: LessonControlGateway,
-  ) { }
+  ) {}
 
   // Update lesson control status (SCHOOL_ADMIN only)
   async updateLessonControl(updateDto: UpdateLessonControlDto, schoolId: string) {
@@ -38,7 +43,10 @@ export class LessonControlService {
       }
     }
 
-    // Upsert lesson control (create if doesn't exist, update if exists)
+    // The 60-minute countdown is anchored server-side the instant the exam opens,
+    // and cleared whenever the lesson leaves QUIZ_OPEN so a later re-open starts fresh.
+    const examStartedAt = updateDto.status === LessonStatus.QUIZ_OPEN ? new Date() : null;
+
     const lessonControl = await this.prisma.lessonControl.upsert({
       where: {
         lessonName_schoolId: {
@@ -48,54 +56,40 @@ export class LessonControlService {
       },
       update: {
         status: updateDto.status,
-        activeQuizId: updateDto.activeQuizId,
+        activeQuizId: updateDto.activeQuizId ?? null,
+        examStartedAt,
       },
       create: {
         lessonName: updateDto.lessonName,
         status: updateDto.status,
         activeQuizId: updateDto.activeQuizId,
+        examStartedAt,
         schoolId,
       },
     });
 
-    // Broadcast real-time update to all clients in the school's room
+    // Instantly broadcast the lockdown/unlock to every connected client in this school's room.
     this.lessonControlGateway.sendLessonStatusUpdate(schoolId, {
       lessonName: lessonControl.lessonName,
       status: lessonControl.status,
       activeQuizId: lessonControl.activeQuizId || undefined,
+      examStartedAt: lessonControl.examStartedAt,
     });
 
     return {
       message: 'Lesson control updated successfully',
-      lessonControl,
+      lessonControl: this.serialize(lessonControl),
     };
   }
 
-  // Get all lesson controls for a school (STUDENT only)
+  // Get all lesson controls for a school (STUDENT + SCHOOL_ADMIN)
   async getLessonControls(schoolId: string) {
-    const lessonControls = await this.prisma.lessonControl.findMany({
+    let lessonControls = await this.prisma.lessonControl.findMany({
       where: { schoolId },
       orderBy: { lessonName: 'asc' },
     });
 
-    // Ensure all 15 lessons have a control record (create missing ones as LOCKED)
-    const allLessons: Lesson[] = [
-      Lesson.LESSON_1,
-      Lesson.LESSON_2,
-      Lesson.LESSON_3,
-      Lesson.LESSON_4,
-      Lesson.LESSON_5,
-      Lesson.LESSON_6,
-      Lesson.LESSON_7,
-      Lesson.LESSON_8,
-      Lesson.LESSON_9,
-      Lesson.LESSON_10,
-      Lesson.LESSON_11,
-      Lesson.LESSON_12,
-      Lesson.LESSON_13,
-      Lesson.LESSON_14,
-      Lesson.LESSON_15,
-    ];
+    const allLessons = Object.values(Lesson);
 
     for (const lesson of allLessons) {
       const existing = lessonControls.find((lc) => lc.lessonName === lesson);
@@ -111,17 +105,20 @@ export class LessonControlService {
       }
     }
 
-    // Sort by lesson name
+    // Self-heal: a read should never report a QUIZ_OPEN lesson whose hour has already
+    // elapsed, even if the cron hasn't ticked yet.
+    lessonControls = await Promise.all(lessonControls.map((lc) => this.expireIfOverdue(lc)));
+
     lessonControls.sort((a, b) => a.lessonName.localeCompare(b.lessonName));
 
     return {
       message: 'Lesson controls retrieved successfully',
-      lessonControls,
+      lessonControls: lessonControls.map((lc) => this.serialize(lc)),
     };
   }
 
-  // Get lesson control for a specific lesson
-  async getLessonControl(lessonName: Lesson, schoolId: string) {
+  // Get lesson control for a specific lesson (used by QuizService to gate submissions)
+  async getLessonControl(lessonName: Lesson, schoolId: string): Promise<LessonControl> {
     const lessonControl = await this.prisma.lessonControl.findUnique({
       where: {
         lessonName_schoolId: {
@@ -132,17 +129,82 @@ export class LessonControlService {
     });
 
     if (!lessonControl) {
-      // Create default locked control if not exists
-      const newControl = await this.prisma.lessonControl.create({
+      return this.prisma.lessonControl.create({
         data: {
           lessonName,
           status: LessonStatus.LOCKED,
           schoolId,
         },
       });
-      return newControl;
     }
 
-    return lessonControl;
+    return this.expireIfOverdue(lessonControl);
+  }
+
+  // 60-Minute Server Countdown: authoritative sweep in case a client never polls again.
+  @Cron(CronExpression.EVERY_30_SECONDS)
+  async expireOverdueExams() {
+    const cutoff = new Date(Date.now() - EXAM_DURATION_MS);
+
+    const overdue = await this.prisma.lessonControl.findMany({
+      where: {
+        status: LessonStatus.QUIZ_OPEN,
+        examStartedAt: { lte: cutoff },
+      },
+    });
+
+    for (const lessonControl of overdue) {
+      await this.lockAndBroadcastExpiry(lessonControl);
+    }
+  }
+
+  private async expireIfOverdue(lessonControl: LessonControl): Promise<LessonControl> {
+    if (
+      lessonControl.status !== LessonStatus.QUIZ_OPEN ||
+      !lessonControl.examStartedAt ||
+      Date.now() - lessonControl.examStartedAt.getTime() < EXAM_DURATION_MS
+    ) {
+      return lessonControl;
+    }
+
+    return this.lockAndBroadcastExpiry(lessonControl);
+  }
+
+  private async lockAndBroadcastExpiry(lessonControl: LessonControl): Promise<LessonControl> {
+    const updated = await this.prisma.lessonControl.update({
+      where: { id: lessonControl.id },
+      data: { status: LessonStatus.LOCKED },
+    });
+
+    this.lessonControlGateway.sendLessonStatusUpdate(updated.schoolId, {
+      lessonName: updated.lessonName,
+      status: updated.status,
+      activeQuizId: updated.activeQuizId || undefined,
+      examStartedAt: updated.examStartedAt,
+    });
+
+    this.lessonControlGateway.sendQuizTimeExpired(updated.schoolId, {
+      lessonName: updated.lessonName,
+      quizId: lessonControl.activeQuizId,
+    });
+
+    this.logger.log(`Exam auto-locked after 60 minutes: ${updated.lessonName} (school ${updated.schoolId})`);
+
+    return updated;
+  }
+
+  private serialize(lessonControl: LessonControl) {
+    const secondsRemaining =
+      lessonControl.status === LessonStatus.QUIZ_OPEN && lessonControl.examStartedAt
+        ? Math.max(
+            0,
+            Math.round((EXAM_DURATION_MS - (Date.now() - lessonControl.examStartedAt.getTime())) / 1000),
+          )
+        : null;
+
+    return {
+      ...lessonControl,
+      secondsRemaining,
+    };
   }
 }

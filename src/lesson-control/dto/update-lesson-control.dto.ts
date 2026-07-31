@@ -18,4 +18,10 @@ export class UpdateLessonControlDto {
   @IsUUID()
   @IsString()
   activeQuizId?: string;
+
+  // Only honored for SUPER_ADMIN; SCHOOL_ADMIN always acts within their own school.
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  schoolId?: string;
 }

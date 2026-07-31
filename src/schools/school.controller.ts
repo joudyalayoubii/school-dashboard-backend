@@ -1,50 +1,51 @@
-import { Controller, Get, Post, Body, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body, Query, UseGuards, Request, BadRequestException, HttpCode, HttpStatus } from '@nestjs/common';
+import { IsNotEmpty, IsString } from 'class-validator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '@prisma/client';
+import { SchoolService } from './school.service';
+import { PrismaService } from '../prisma/prisma.service';
 
 export class CreateSchoolDto {
+  @IsString()
+  @IsNotEmpty()
   name: string;
 }
 
-export class CreateStudentDto {
+export class UpdateSchoolDto {
+  @IsString()
+  @IsNotEmpty()
   name: string;
-  username: string;
-  password: string;
 }
 
 @Controller('schools')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class SchoolController {
+  constructor(
+    private schoolService: SchoolService,
+    private prisma: PrismaService,
+  ) {}
+
   // Only SUPER_ADMIN can create a school
   @Post()
   @Roles(Role.SUPER_ADMIN)
-  async createSchool(@Body() createSchoolDto: CreateSchoolDto, @Request() req) {
+  async createSchool(@Body() createSchoolDto: CreateSchoolDto) {
+    const school = await this.prisma.school.create({
+      data: { name: createSchoolDto.name },
+    });
+
     return {
       message: 'School created successfully',
-      createdBy: req.user.username,
-      schoolData: createSchoolDto,
+      school,
     };
   }
   @Get()
   @Roles(Role.SUPER_ADMIN)
-  async getSchools(){
-    return{
-        
-
-    }
-  }
-
-  // Only SCHOOL_ADMIN can add a student
-  @Post('students')
-  @Roles(Role.SCHOOL_ADMIN)
-  async addStudent(@Body() createStudentDto: CreateStudentDto, @Request() req) {
+  async getSchools() {
     return {
-      message: 'Student added successfully',
-      addedBy: req.user.username,
-      schoolId: req.user.schoolId,
-      studentData: createStudentDto,
+      message: 'Schools retrieved successfully',
+      schools: await this.schoolService.getAllSchools(),
     };
   }
 
@@ -56,11 +57,7 @@ export class SchoolController {
       message: 'Lessons retrieved successfully',
       user: req.user.username,
       role: req.user.role,
-      lessons: [
-        { id: 1, name: 'Lesson 1', topic: 'Introduction' },
-        { id: 2, name: 'Lesson 2', topic: 'Advanced Concepts' },
-        { id: 3, name: 'Lesson 3', topic: 'Practical Applications' },
-      ],
+      lessons: await this.schoolService.getLessonsForSchool(req.user.schoolId),
     };
   }
 
@@ -71,25 +68,49 @@ export class SchoolController {
     return {
       message: 'All schools retrieved successfully',
       requestedBy: req.user.username,
-      schools: [
-        { id: 1, name: 'School A' },
-        { id: 2, name: 'School B' },
-      ],
+      schools: await this.schoolService.getAllSchools(),
     };
   }
 
-  // SCHOOL_ADMIN can view their own school details
+  // SCHOOL_ADMIN can view their own school details; SUPER_ADMIN must specify schoolId
   @Get('details')
-  @Roles(Role.SCHOOL_ADMIN)
-  async getSchoolDetails(@Request() req) {
+  @Roles(Role.SCHOOL_ADMIN, Role.SUPER_ADMIN)
+  async getSchoolDetails(@Request() req, @Query('schoolId') schoolId?: string) {
+    const targetSchoolId = req.user.role === Role.SUPER_ADMIN ? schoolId : req.user.schoolId;
+
+    if (!targetSchoolId) {
+      throw new BadRequestException('schoolId query param is required for SUPER_ADMIN');
+    }
+
+    const details = await this.schoolService.getSchoolDetails(targetSchoolId);
+
     return {
       message: 'School details retrieved successfully',
-      schoolId: req.user.schoolId,
-      details: {
-        id: req.user.schoolId,
-        name: 'My School',
-        studentCount: 150,
-      },
+      details,
+    };
+  }
+
+  // PATCH /schools/:id - Rename a school (SUPER_ADMIN only)
+  @Patch(':id')
+  @Roles(Role.SUPER_ADMIN)
+  async updateSchool(@Param('id') id: string, @Body() updateSchoolDto: UpdateSchoolDto) {
+    const school = await this.schoolService.updateSchool(id, updateSchoolDto.name);
+
+    return {
+      message: 'School updated successfully',
+      school,
+    };
+  }
+
+  // DELETE /schools/:id - Permanently delete a school and everything in it (SUPER_ADMIN only)
+  @Delete(':id')
+  @Roles(Role.SUPER_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  async deleteSchool(@Param('id') id: string) {
+    await this.schoolService.deleteSchool(id);
+
+    return {
+      message: 'School deleted successfully',
     };
   }
 }

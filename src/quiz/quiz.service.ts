@@ -2,6 +2,7 @@ import { Injectable, ConflictException, NotFoundException, ForbiddenException } 
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateQuizDto } from './dto/create-quiz.dto';
 import { AddQuestionsDto } from './dto/create-question.dto';
+import { UpdateQuestionDto } from './dto/update-question.dto';
 import { SubmitQuizDto } from './dto/submit-quiz.dto';
 import { Lesson, LessonStatus } from '@prisma/client';
 import { LessonControlService } from '../lesson-control/lesson-control.service';
@@ -44,8 +45,8 @@ export class QuizService {
     };
   }
 
-  // Add questions to a quiz (SCHOOL_ADMIN only)
-  async addQuestions(quizId: string, questionsDto: AddQuestionsDto, schoolId: string) {
+  // Add questions to a quiz. schoolId is null for SUPER_ADMIN, who may act on any school's quiz.
+  async addQuestions(quizId: string, questionsDto: AddQuestionsDto, schoolId: string | null) {
     // Verify quiz belongs to the admin's school
     const quiz = await this.prisma.quiz.findUnique({
       where: { id: quizId },
@@ -55,7 +56,7 @@ export class QuizService {
       throw new NotFoundException('Quiz not found');
     }
 
-    if (quiz.schoolId !== schoolId) {
+    if (schoolId !== null && quiz.schoolId !== schoolId) {
       throw new ForbiddenException('You can only add questions to quizzes in your school');
     }
 
@@ -76,8 +77,111 @@ export class QuizService {
     };
   }
 
-  // Get quiz by lesson name for student (without correct answers)
-  async getQuizByLesson(lessonName: Lesson, studentSchoolId: string) {
+  // Get a quiz with its full questions (including correctAnswer) for admin management.
+  async getQuizForAdmin(quizId: string, schoolId: string | null) {
+    const quiz = await this.findOwnedQuiz(quizId, schoolId);
+
+    const questions = await this.prisma.question.findMany({
+      where: { quizId: quiz.id },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return { ...quiz, questions };
+  }
+
+  // schoolId is null for SUPER_ADMIN, who may act on any school's quiz.
+  private async findOwnedQuiz(quizId: string, schoolId: string | null) {
+    const quiz = await this.prisma.quiz.findUnique({ where: { id: quizId } });
+
+    if (!quiz) {
+      throw new NotFoundException('Quiz not found');
+    }
+
+    if (schoolId !== null && quiz.schoolId !== schoolId) {
+      throw new ForbiddenException('You can only manage quizzes in your school');
+    }
+
+    return quiz;
+  }
+
+  // Delete a quiz entirely (SCHOOL_ADMIN or SUPER_ADMIN). Cascades to questions and submissions,
+  // and clears it as any lesson's activeQuizId to avoid a dangling reference.
+  async deleteQuiz(quizId: string, schoolId: string | null) {
+    const quiz = await this.findOwnedQuiz(quizId, schoolId);
+
+    await this.prisma.lessonControl.updateMany({
+      where: { activeQuizId: quizId },
+      data: { activeQuizId: null, status: LessonStatus.LOCKED },
+    });
+
+    await this.prisma.quiz.delete({ where: { id: quiz.id } });
+
+    return { message: 'Quiz deleted successfully' };
+  }
+
+  async updateQuestion(quizId: string, questionId: string, dto: UpdateQuestionDto, schoolId: string | null) {
+    await this.findOwnedQuiz(quizId, schoolId);
+
+    const question = await this.prisma.question.findUnique({ where: { id: questionId } });
+    if (!question || question.quizId !== quizId) {
+      throw new NotFoundException('Question not found on this quiz');
+    }
+
+    const updated = await this.prisma.question.update({
+      where: { id: questionId },
+      data: {
+        ...(dto.questionText ? { questionText: dto.questionText } : {}),
+        ...(dto.questionType ? { questionType: dto.questionType } : {}),
+        ...(dto.options !== undefined ? { options: dto.options } : {}),
+        ...(dto.correctAnswer ? { correctAnswer: dto.correctAnswer } : {}),
+      },
+    });
+
+    return {
+      message: 'Question updated successfully',
+      question: updated,
+    };
+  }
+
+  async deleteQuestion(quizId: string, questionId: string, schoolId: string | null) {
+    await this.findOwnedQuiz(quizId, schoolId);
+
+    const question = await this.prisma.question.findUnique({ where: { id: questionId } });
+    if (!question || question.quizId !== quizId) {
+      throw new NotFoundException('Question not found on this quiz');
+    }
+
+    await this.prisma.question.delete({ where: { id: questionId } });
+
+    return { message: 'Question deleted successfully' };
+  }
+
+  // List quizzes for a school (SCHOOL_ADMIN dashboard - e.g. the exam-assignment dropdown)
+  async listQuizzesForSchool(schoolId: string) {
+    const quizzes = await this.prisma.quiz.findMany({
+      where: { schoolId },
+      orderBy: { lessonName: 'asc' },
+      include: {
+        _count: { select: { questions: true } },
+      },
+    });
+
+    return {
+      quizzes: quizzes.map((quiz) => ({
+        id: quiz.id,
+        lessonName: quiz.lessonName,
+        questionCount: quiz._count.questions,
+        createdAt: quiz.createdAt,
+      })),
+    };
+  }
+
+  // Get quiz by lesson name for student (without correct answers). Also reports
+  // whether this student already has a graded submission for it (mySubmission),
+  // so the Qt client can refuse to let them retake an already-scored exam
+  // instead of only finding out at submit time (which the backend still
+  // enforces below via the existingSubmission ConflictException either way).
+  async getQuizByLesson(lessonName: Lesson, studentSchoolId: string, studentId: string) {
     const quiz = await this.prisma.quiz.findUnique({
       where: {
         lessonName_schoolId: {
@@ -102,7 +206,25 @@ export class QuizService {
       throw new NotFoundException('Quiz not found for this lesson in your school');
     }
 
-    return quiz;
+    const submission = await this.prisma.submission.findUnique({
+      where: {
+        studentId_quizId: {
+          studentId,
+          quizId: quiz.id,
+        },
+      },
+    });
+
+    return {
+      ...quiz,
+      // NOTE: StripCorrectAnswerInterceptor (applied on this route) recursively
+      // rebuilds every plain object via Object.entries/fromEntries, which turns
+      // a raw Date instance into `{}` (Date has no own enumerable properties).
+      // Pre-serializing to an ISO string here sidesteps that entirely.
+      mySubmission: submission
+        ? { score: submission.score, submittedAt: submission.createdAt.toISOString() }
+        : null,
+    };
   }
 
   // Submit quiz answers and calculate score

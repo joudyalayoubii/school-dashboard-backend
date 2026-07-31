@@ -1,4 +1,4 @@
-import { IsEnum, IsNotEmpty, IsString, IsOptional, IsUUID } from 'class-validator';
+import { IsEnum, IsNotEmpty, IsString, IsOptional } from 'class-validator';
 import { Lesson } from '@prisma/client';
 
 export class CreateQuizDto {
@@ -9,7 +9,7 @@ export class CreateQuizDto {
   lessonName: Lesson;
 
   @IsOptional()
-  @IsUUID()
   @IsString()
+  @IsNotEmpty()
   schoolId?: string;
 }

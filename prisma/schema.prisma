@@ -113,12 +113,13 @@ model Submission {
 }
 
 model LessonControl {
-  id           String        @id @default(uuid())
-  lessonName   Lesson
-  status       LessonStatus  @default(LOCKED)
-  activeQuizId String?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  id            String        @id @default(uuid())
+  lessonName    Lesson
+  status        LessonStatus  @default(LOCKED)
+  activeQuizId  String?
+  examStartedAt DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
 
   schoolId     String
   school       School        @relation(fields: [schoolId], references: [id], onDelete: Cascade)

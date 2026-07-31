@@ -1,15 +1,21 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { ToastProvider } from "@/components/ui/toast";
 
 export const metadata: Metadata = {
-  title: "School Admin Dashboard",
-  description: "Modern dashboard for school administration",
+  title: {
+    default: "School Dashboard",
+    template: "%s · School Dashboard",
+  },
+  description: "Live classroom control, quizzes, and student oversight for schools.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <ToastProvider>{children}</ToastProvider>
+      </body>
     </html>
   );
 }

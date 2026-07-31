@@ -1,104 +1,114 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { BookOpen, LayoutDashboard, LogOut, School, Users } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useState, type ReactNode } from "react";
+import { ArrowLeft, BookOpen, LayoutDashboard, School, Users } from "lucide-react";
+import api from "@/lib/api";
+import { clearSession, getUser } from "@/lib/auth";
+import { SchoolIdProvider } from "@/lib/school-context";
+import { disconnectSocket, getSocket } from "@/lib/socket";
+import { AppShell, type NavItem } from "@/components/ui/app-shell";
 
-const navigation = [
+const navigation: NavItem[] = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
   { href: "/dashboard/students", label: "Manage Students", icon: Users },
   { href: "/dashboard/lessons", label: "Lesson & Quiz Control", icon: BookOpen },
 ];
 
+type SchoolDetails = {
+  name: string;
+  studentCount: number;
+};
+
 export default function DashboardLayout({ children }: { children: ReactNode }) {
-  const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [authorized, setAuthorized] = useState(false);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [effectiveSchoolId, setEffectiveSchoolId] = useState<string | null>(null);
   const [schoolInfo, setSchoolInfo] = useState({
-    name: "Northview School",
-    address: "Mansoura, Egypt",
-    adminName: "Ava Thompson",
+    name: "School",
+    adminName: "Admin",
   });
 
-  useEffect(() => {
-    const storedSchool = window.localStorage.getItem("schoolAdminProfile");
-    if (storedSchool) {
-      try {
-        const parsed = JSON.parse(storedSchool);
-        setSchoolInfo({
-          name: parsed.schoolName ?? schoolInfo.name,
-          address: parsed.schoolAddress ?? schoolInfo.address,
-          adminName: parsed.adminName ?? schoolInfo.adminName,
-        });
-      } catch {
-        // ignore malformed storage payload
-      }
-    }
-  }, []);
+  const impersonatedSchoolId = searchParams.get("schoolId");
 
-  const activeLabel = useMemo(() => navigation.find((item) => item.href === pathname)?.label ?? "Overview", [pathname]);
+  useEffect(() => {
+    const user = getUser();
+    if (!user || (user.role !== "SCHOOL_ADMIN" && user.role !== "SUPER_ADMIN")) {
+      router.replace("/login");
+      return;
+    }
+
+    if (user.role === "SUPER_ADMIN" && !impersonatedSchoolId) {
+      router.replace("/super-admin");
+      return;
+    }
+
+    const targetSchoolId = user.role === "SUPER_ADMIN" ? impersonatedSchoolId : user.schoolId;
+    setIsSuperAdmin(user.role === "SUPER_ADMIN");
+    setEffectiveSchoolId(targetSchoolId);
+    setSchoolInfo((current) => ({ ...current, adminName: user.name }));
+    setAuthorized(true);
+
+    const loadSchoolDetails = async () => {
+      try {
+        const response = await api.get<{ details: SchoolDetails }>("/schools/details", {
+          params: user.role === "SUPER_ADMIN" ? { schoolId: targetSchoolId } : undefined,
+        });
+        if (response.data?.details) {
+          setSchoolInfo((current) => ({ ...current, name: response.data.details.name }));
+        }
+      } catch (error) {
+        console.error("Failed to load school details:", error);
+      }
+    };
+
+    void loadSchoolDetails();
+  }, [router, impersonatedSchoolId]);
+
+  const withSchoolQuery = (href: string) =>
+    isSuperAdmin && effectiveSchoolId ? `${href}?schoolId=${effectiveSchoolId}` : href;
+
+  const handleLogout = () => {
+    disconnectSocket(getSocket());
+    clearSession();
+    router.push("/login");
+  };
+
+  if (!authorized) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-zinc-950">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-solid border-zinc-700 border-t-emerald-500" />
+      </div>
+    );
+  }
+
+  const nav = navigation.map((item) => ({ ...item, href: withSchoolQuery(item.href) }));
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto flex max-w-7xl flex-col lg:flex-row">
-        <aside className="w-full border-b border-slate-800 bg-slate-900/80 p-6 lg:min-h-screen lg:w-72 lg:border-b-0 lg:border-r">
-          <div className="flex items-center gap-3 rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-            <div className="rounded-xl bg-emerald-500/20 p-3 text-emerald-300">
-              <School size={20} />
-            </div>
-            <div>
-              <p className="text-sm text-slate-400">Signed in as</p>
-              <p className="font-semibold text-white">{schoolInfo.adminName}</p>
-            </div>
-          </div>
-
-          <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">School profile</p>
-            <h2 className="mt-2 text-lg font-semibold text-white">{schoolInfo.name}</h2>
-            <p className="mt-1 text-sm text-slate-400">{schoolInfo.address}</p>
-          </div>
-
-          <nav className="mt-6 space-y-2">
-            {navigation.map((item) => {
-              const Icon = item.icon;
-              const isActive = pathname === item.href;
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition ${
-                    isActive ? "bg-emerald-500/15 text-emerald-300" : "text-slate-300 hover:bg-slate-800 hover:text-white"
-                  }`}
-                >
-                  <Icon size={18} />
-                  {item.label}
-                </Link>
-              );
-            })}
-          </nav>
-
-          <div className="mt-8 rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-            <p className="text-sm text-slate-400">Quick note</p>
-            <p className="mt-2 text-sm text-slate-200">Keep lesson access aligned with live quiz availability for smoother classroom flow.</p>
-            <button className="mt-4 flex items-center gap-2 text-sm font-medium text-rose-300">
-              <LogOut size={16} />
-              Sign out
-            </button>
-          </div>
-        </aside>
-
-        <main className="flex-1 p-6 lg:p-8">
-          <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-sm uppercase tracking-[0.24em] text-emerald-400">School Admin</p>
-              <h1 className="text-3xl font-semibold text-white">{activeLabel}</h1>
-            </div>
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm text-slate-300">
-              {schoolInfo.name} · Live operations ready
-            </div>
-          </div>
-          {children}
-        </main>
-      </div>
-    </div>
+    <AppShell
+      brandIcon={<School size={24} />}
+      identityLabel="Signed in as"
+      identityValue={schoolInfo.adminName}
+      subLabel="School Profile"
+      subValue={schoolInfo.name}
+      nav={nav}
+      extraNav={
+        isSuperAdmin ? (
+          <Link
+            href="/super-admin"
+            className="flex shrink-0 items-center gap-4 rounded-xl border border-violet-500/30 bg-violet-500/10 px-5 py-4 text-sm font-semibold text-violet-300 hover:bg-violet-500/20 transition-colors lg:mb-2 lg:w-full"
+          >
+            <ArrowLeft size={20} />
+            Back to All Schools
+          </Link>
+        ) : undefined
+      }
+      onLogout={handleLogout}
+    >
+      <SchoolIdProvider value={isSuperAdmin ? effectiveSchoolId : null}>{children}</SchoolIdProvider>
+    </AppShell>
   );
 }
